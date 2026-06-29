@@ -1,7 +1,46 @@
 from fastmcp import FastMCP
 import os
-import aiosqlite  # Changed: sqlite3 → aiosqlite
 import tempfile
+
+try:
+    import aiosqlite  # type: ignore[import-not-found]
+except ImportError:
+    import asyncio
+    import sqlite3
+
+    class _FallbackCursor:
+        def __init__(self, cursor):
+            self._cursor = cursor
+            self.description = cursor.description
+            self.lastrowid = cursor.lastrowid
+
+        async def fetchall(self):
+            return await asyncio.to_thread(self._cursor.fetchall)
+
+    class _FallbackConnection:
+        def __init__(self, path):
+            self._connection = sqlite3.connect(path, check_same_thread=False)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self._connection.close()
+            return False
+
+        async def execute(self, query, params=()):
+            cursor = await asyncio.to_thread(self._connection.execute, query, params)
+            return _FallbackCursor(cursor)
+
+        async def commit(self):
+            await asyncio.to_thread(self._connection.commit)
+
+    class _FallbackAiosqlite:
+        @staticmethod
+        def connect(path):
+            return _FallbackConnection(path)
+
+    aiosqlite = _FallbackAiosqlite()
 # Use temporary directory which should be writable
 TEMP_DIR = tempfile.gettempdir()
 DB_PATH = os.path.join(TEMP_DIR, "expenses.db")
@@ -10,6 +49,7 @@ CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
 print(f"Database path: {DB_PATH}")
 
 mcp = FastMCP("ExpenseTracker")
+
 
 def init_db():  # Keep as sync for initialization
     try:
@@ -28,15 +68,18 @@ def init_db():  # Keep as sync for initialization
                 )
             """)
             # Test write access
-            c.execute("INSERT OR IGNORE INTO expenses(date, amount, category) VALUES ('2000-01-01', 0, 'test')")
+            c.execute(
+                "INSERT OR IGNORE INTO expenses(date, amount, category) VALUES ('2000-01-01', 0, 'test')")
             c.execute("DELETE FROM expenses WHERE category = 'test'")
             print("Database initialized successfully with write access")
     except Exception as e:
         print(f"Database initialization error: {e}")
         raise
 
+
 # Initialize database synchronously at module load
 init_db()
+
 
 @mcp.tool()
 async def add_expense(date, amount, category, subcategory="", note=""):  # Changed: added async
@@ -54,7 +97,8 @@ async def add_expense(date, amount, category, subcategory="", note=""):  # Chang
         if "readonly" in str(e).lower():
             return {"status": "error", "message": "Database is in read-only mode. Check file permissions."}
         return {"status": "error", "message": f"Database error: {str(e)}"}
-    
+
+
 @mcp.tool()
 async def list_expenses(start_date, end_date):  # Changed: added async
     '''List expense entries within an inclusive date range.'''
@@ -70,9 +114,11 @@ async def list_expenses(start_date, end_date):  # Changed: added async
                 (start_date, end_date)
             )
             cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in await cur.fetchall()]  # Changed: added await
+            # Changed: added await
+            return [dict(zip(cols, r)) for r in await cur.fetchall()]
     except Exception as e:
         return {"status": "error", "message": f"Error listing expenses: {str(e)}"}
+
 
 @mcp.tool()
 async def summarize(start_date, end_date, category=None):  # Changed: added async
@@ -94,11 +140,14 @@ async def summarize(start_date, end_date, category=None):  # Changed: added asyn
 
             cur = await c.execute(query, params)  # Changed: added await
             cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in await cur.fetchall()]  # Changed: added await
+            # Changed: added await
+            return [dict(zip(cols, r)) for r in await cur.fetchall()]
     except Exception as e:
         return {"status": "error", "message": f"Error summarizing expenses: {str(e)}"}
 
-@mcp.resource("expense:///categories", mime_type="application/json")  # Changed: expense:// → expense:///
+
+# Changed: expense:// → expense:///
+@mcp.resource("expense:///categories", mime_type="application/json")
 def categories():
     try:
         # Provide default categories if file doesn't exist
@@ -116,7 +165,7 @@ def categories():
                 "Other"
             ]
         }
-        
+
         try:
             with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
                 return f.read()
@@ -125,6 +174,7 @@ def categories():
             return json.dumps(default_categories, indent=2)
     except Exception as e:
         return f'{{"error": "Could not load categories: {str(e)}"}}'
+
 
 # Start the server
 if __name__ == "__main__":
